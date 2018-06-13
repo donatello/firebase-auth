@@ -21,11 +21,12 @@ import           Network.HTTP.Simple as Exports (Request, Response,
                                                  getRequestQueryString,
                                                  getResponseBody,
                                                  getResponseStatus, httpBS,
-                                                 parseRequest_,
+                                                 httpJSONEither, parseRequest_,
                                                  setRequestBodyJSON,
                                                  setRequestBodyURLEncoded,
                                                  setRequestQueryString)
 import           Network.HTTP.Types  as Exports (Status, status200)
+import           UnliftIO            as Exports (MonadUnliftIO)
 
 import qualified Data.Aeson          as A
 import qualified Data.Char           as C

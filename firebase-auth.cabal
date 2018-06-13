@@ -21,11 +21,21 @@ library
   build-depends:       base >= 4.7 && < 5
                      , protolude >= 0.2.2 && < 0.3
                      , aeson
+                     , base64-bytestring
                      , bytestring
+                     , cryptonite
+                     , errors
                      , http-conduit
                      , http-types
+                     , jose
+                     , microlens
+                     , pem
                      , scientific
                      , text
+                     , unliftio
+                     , unordered-containers
+                     , x509
+
   default-language:    Haskell2010
   default-extensions:  OverloadedStrings
                      , NoImplicitPrelude

@@ -8,6 +8,7 @@ module Firebase.Auth
     -- $use
 
       Connector
+    , mkConnector
     , runIO
 
     , SignupResponse(..)
@@ -31,24 +32,41 @@ module Firebase.Auth
     , confirmEmailVerification
 
     , ApiErr(..)
+
+    , extractTokenClaims
     ) where
 
 
-
-import           Data.Aeson.TH (deriveJSON)
-import           Data.String   (IsString (fromString))
+import           Control.Error           (fmapL)
+import           Crypto.JOSE.Compact     (decodeCompact)
+import qualified Crypto.JOSE.JWK         as JWK
+import qualified Crypto.JOSE.JWS         as JWS
+import qualified Crypto.JOSE.Types       as JTypes
+import qualified Crypto.JWT              as JWT
+import           Crypto.PubKey.RSA.Types (PublicKey (..))
+import           Data.Aeson.TH           (deriveJSON)
+import qualified Data.ByteString.Base64  as B64
+import qualified Data.ByteString.Char8   as B8
+import qualified Data.HashMap.Strict     as H
+import qualified Data.PEM                as Pem
+import qualified Data.Text               as T
+import qualified Data.X509               as X509
+import           Lens.Micro              ((&), (.~))
+import qualified UnliftIO.Concurrent     as Conc
 
 import           Lib.Prelude
 
 -- The Connector provides data required to make calls to the Firebase
--- endpoints. It is an instance of `IsString` instance that can be
--- used to provide the Firebase API Key.
-data Connector = Connector { cApiKey :: ByteString
-                           }
-                 deriving (Show, Eq)
+-- endpoints.
+data Connector = Connector
+                 { cSecureTokenPubKeys :: Conc.MVar (H.HashMap Text JWT.JWK)
+                 , cApiKey             :: ByteString
+                 }
 
-instance IsString Connector where
-    fromString = Connector . toS
+mkConnector :: (MonadIO m) => ByteString -> m Connector
+mkConnector apiKey = do
+    keyStore <- Conc.newMVar H.empty
+    return $ Connector keyStore apiKey
 
 -- The simplest way to call the Firebase APIs provided in this
 -- module. Use this if your application does not already have a Monad
@@ -252,3 +270,99 @@ confirmEmailVerification oobCode = do
 -- > case result of
 -- >     Right signupResp -> print signupResp
 -- >     Left apiErr -> print $ "Error: " ++ show apiErr
+
+loadSecureTokenSigningKeys :: (MonadIO m)
+                           => m (Either Text (H.HashMap Text JWT.JWK))
+loadSecureTokenSigningKeys = do
+    let url = "GET https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+        req = parseRequest_ url
+    resp <- httpJSONEither req
+    let st = getResponseStatus resp
+    if st == status200
+        then return $ parseKeys $ fmapL show $ getResponseBody resp
+        else return $ Left $
+             T.concat ["Got SecureToken fetch HTTP status error: ", show st]
+
+  where
+    fromCertRaw :: ByteString -> Either Text X509.Certificate
+    fromCertRaw s = do
+        pems <- fmapL toS $ Pem.pemParseBS s
+        pem <- note "No pem found" $ headMay pems
+        signedExactCert <- fmapL toS $ X509.decodeSignedCertificate $
+                           Pem.pemContent pem
+        let sCert = X509.getSigned signedExactCert
+            cert = X509.signedObject sCert
+        return cert
+
+    certToJwk :: X509.Certificate -> Either Text JWT.JWK
+    certToJwk cert = do
+        let X509.PubKeyRSA (PublicKey size n e) = X509.certPubKey cert
+            jwk = JWK.fromKeyMaterial $ JWK.RSAKeyMaterial $
+                  JWK.RSAKeyParameters (JTypes.SizedBase64Integer size n)
+                  (JTypes.Base64Integer e) Nothing
+            jwk' = jwk & JWK.jwkKeyOps .~ Just [JWK.Verify]
+        return jwk'
+
+    parseKeys :: Either Text (H.HashMap Text Text)
+              -> Either Text (H.HashMap Text JWT.JWK)
+    parseKeys b = do
+        rawCertsMap <- H.map toS <$> b
+        certsPairList <- forM (H.toList rawCertsMap) $ \(k, v) -> do
+                             cert <- fromCertRaw v
+                             return (k, cert)
+        keyPairList <- forM certsPairList $ \(k, v) -> do
+                           jwk <- certToJwk v
+                           return (k, jwk)
+        return $ H.fromList keyPairList
+
+-- certRaw :: ByteString
+-- certRaw = "-----BEGIN CERTIFICATE-----\nMIIDHDCCAgSgAwIBAgIIWbdIODxWwn4wDQYJKoZIhvcNAQEFBQAwMTEvMC0GA1UE\nAxMmc2VjdXJldG9rZW4uc3lzdGVtLmdzZXJ2aWNlYWNjb3VudC5jb20wHhcNMTgw\nNjEwMjEyMDEzWhcNMTgwNjI3MDkzNTEzWjAxMS8wLQYDVQQDEyZzZWN1cmV0b2tl\nbi5zeXN0ZW0uZ3NlcnZpY2VhY2NvdW50LmNvbTCCASIwDQYJKoZIhvcNAQEBBQAD\nggEPADCCAQoCggEBALk4bcd+YUx4/E5Mnwl/2Fdcsf4A2vF75FAYyxD8fskpvADP\n7D+5JKI5nh4vUoS1Ix32PZD0QTThcv82aCXZHFSu6LSddcosG7QmnLKktWRt+2SP\nX/QCdM9XbtXK1xynB5rRzCGrPwC2SjH8cs+OJtu229ahfeiwpszBDhmfjNO+Y7It\nvBkCuKOhjGm9w4vxZeJyZRRj2tBKeV1M/B9FD3j/QuxmNuSLdMEuhJ4bgz/Lq5s1\nlBOEFnNvDd0Q4sqMu3Y4D8zdg5I/e94HPaJ28cRG7yCfi+MXnCxOp1g+CaJTMoMJ\niAvuR6UwAPpCTcIar5EIBFrRaswIDAx5812k5QECAwEAAaM4MDYwDAYDVR0TAQH/\nBAIwADAOBgNVHQ8BAf8EBAMCB4AwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwIwDQYJ\nKoZIhvcNAQEFBQADggEBACWQqzw/w4bch+fG2rjGCduecNYr5rLxzHo3Kj7W8s7e\nnkQznlUS/2X56DvvtKG/4gJiPSwfjGw+L2p9/FiDyAyZNAePXYpNgXVi/0APZahZ\ncOmiZMWeQWzNr6GSoWHGvWawXNOruCUioCF7g1Ryk78Rhd1lDuTXOtQiCgj55K1B\nqTASch4uau5ni+Zjjebu0njeleDK59NKmq5LUv0pRfrM3ifZr1rH2p8KoRO82cn9\n77GDrPQsO5yT5Uoe+pubeb/cMCq6Hngi0THK0P4XJDkojGYd0EgkDemdMg3GIXny\ngSgOb+W6c4VqRRUvK2o2BlIfGCitmFItmoSTrINNQNM=\n-----END CERTIFICATE-----\n"
+
+-- idToken :: ByteString
+-- idToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjdhM2QxOTA0ZjE4ZTI1Nzk0ODgzMWVhYjgwM2UxMmI3OTcxZTEzYWIifQ.eyJpc3MiOiJodHRwczovL3NlY3VyZXRva2VuLmdvb2dsZS5jb20vbXlkZW1vLWI0MzVmIiwiYXVkIjoibXlkZW1vLWI0MzVmIiwiYXV0aF90aW1lIjoxNTI4NzQ5OTMxLCJ1c2VyX2lkIjoiVUNMeW9PcE9uaVZaYndhcUdKdDduMjdtQmhuMiIsInN1YiI6IlVDTHlvT3BPbmlWWmJ3YXFHSnQ3bjI3bUJobjIiLCJpYXQiOjE1Mjg3NDk5MzEsImV4cCI6MTUyODc1MzUzMSwiZW1haWwiOiJhZGl0eWFAbWluaW8uaW8iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJhZGl0eWFAbWluaW8uaW8iXX0sInNpZ25faW5fcHJvdmlkZXIiOiJwYXNzd29yZCJ9fQ.Zp3V4t86KJdtE4bciHmSAOb8AWMPJhSwb-hP-UTLoKpW8soVufnXlvOvxlOF5ptsyP9r0ScCaA8gGA6Og6RGqsXg3Q_eyqdGnGOeB2K0MLN4Kgk-YBHaUe4U6rUcXaN_kG3gdiLu7oIpzY8Afgyojj0H3r_4GQ_T7npVC-cf4XxjsvmICYh_i2UTc0TAgHsnWJKiHC49Ja-U53RARzLq2hkAAomWy_Bpy0Y_uDyHpsDdEg8wsdK400CZh-8ONklcaOCyAZaUFC63xUqJw1dvzA1975_h0V_gGneuAqldS0o7q0lovcl0KHRDkjiKNtr2g46l8ztNhuFrj5Dk4U_JrQ1"
+
+-- Takes a token, parses header info and returns a pair of (algo, kid)
+getTokenInfo :: ByteString -> Either Text (Text, Text)
+getTokenInfo token = do
+    header <- note "Invalid token" $ headMay $ B8.split '.' token
+    v <- fmapL toS $ eitherDecodeStrict $ B64.decodeLenient header
+    let [alg, kid] = ["alg", "kid"] :: [Text]
+    note "Invalid token" ((,) <$> H.lookup alg v <*> H.lookup kid v)
+
+verifyToken :: ByteString -> H.HashMap Text JWT.JWK -> Either (Maybe Text) Value
+verifyToken token keyStore = do
+    (_, kid) <- fmapL Just $ getTokenInfo token
+    jwk <- note Nothing $ H.lookup kid keyStore
+    jws <- fmapL (Just . show) $ (decodeCompact (toS token) :: Either JWT.Error  (JWS.CompactJWS JWS.JWSHeader))
+    payload <- fmapL (Just . show) $ (JWS.verifyJWS' jwk jws :: Either JWT.Error ByteString)
+    fmapL (Just . show) $ eitherDecodeStrict payload
+
+verifyTokenWithKeyReload :: (MonadIO m)
+                         => ByteString -> H.HashMap Text JWT.JWK
+                         -> Bool
+                         -> m (Either Text (H.HashMap Text JWT.JWK, Value))
+verifyTokenWithKeyReload token keyStore isReloaded =
+    case getTokenInfo token of
+        Left err -> return $ Left err
+        Right (_, kid)
+            | H.member kid keyStore -> return $ do
+                  payload <- fmapL (maybe "InvalidToken" identity) $
+                             verifyToken token keyStore
+                  return (keyStore, payload)
+            | isReloaded -> return $ Left "InvalidToken"
+            | otherwise -> do
+                  newStoreE <- loadSecureTokenSigningKeys
+                  either
+                      (return . Left)
+                      (\store -> verifyTokenWithKeyReload token store True)
+                      newStoreE
+
+extractTokenClaims :: (MonadReader Connector m, MonadIO m, MonadUnliftIO m)
+                   => ByteString -> m (Either Text Value)
+extractTokenClaims token = do
+    keyStoreVar <- asks cSecureTokenPubKeys
+    Conc.modifyMVar keyStoreVar $ \keyStore -> do
+        res <- verifyTokenWithKeyReload token keyStore False
+        case res of
+            Left err              -> return (keyStore, Left err)
+            Right (newStore, val) -> return (newStore, Right val)
