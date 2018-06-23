@@ -15,7 +15,8 @@ import           Protolude           as Exports
 
 import           Data.Aeson          as Exports (FromJSON, ToJSON, Value,
                                                  eitherDecodeStrict, object,
-                                                 (.=))
+                                                 toJSON, (.=))
+import           Data.EitherR        as Exports (fmapLT)
 import           Data.Scientific     as Exports (Scientific)
 import           Network.HTTP.Simple as Exports (Request, Response,
                                                  getRequestQueryString,

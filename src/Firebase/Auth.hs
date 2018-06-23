@@ -34,6 +34,8 @@ module Firebase.Auth
     , ApiErr(..)
 
     , extractTokenClaims
+
+    , AuthError(..)
     ) where
 
 
@@ -49,9 +51,9 @@ import qualified Data.ByteString.Base64  as B64
 import qualified Data.ByteString.Char8   as B8
 import qualified Data.HashMap.Strict     as H
 import qualified Data.PEM                as Pem
-import qualified Data.Text               as T
 import qualified Data.X509               as X509
 import           Lens.Micro              ((&), (.~))
+import qualified Network.HTTP.Types      as HT
 import qualified UnliftIO.Concurrent     as Conc
 
 import           Lib.Prelude
@@ -271,40 +273,59 @@ confirmEmailVerification oobCode = do
 -- >     Right signupResp -> print signupResp
 -- >     Left apiErr -> print $ "Error: " ++ show apiErr
 
+data AuthError = AEPublicKeyFetchHTTPStatus HT.Status
+               | AECertParseError Text
+               | AEUnexpectedCertFormat
+               | AEInvalidToken
+               | AEInvalidTokenHeader Text
+               | AEUnknownKid
+               | AETokenDecode Text
+               | AEVerification Text
+               | AEPayloadDecode Text
+               | AEUnknown Text
+               deriving (Eq, Show)
+
+instance Exception AuthError
+
 loadSecureTokenSigningKeys :: (MonadIO m)
-                           => m (Either Text (H.HashMap Text JWT.JWK))
+                           => m (Either AuthError (H.HashMap Text JWT.JWK))
 loadSecureTokenSigningKeys = do
     let url = "GET https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
         req = parseRequest_ url
     resp <- httpJSONEither req
     let st = getResponseStatus resp
     if st == status200
-        then return $ parseKeys $ fmapL show $ getResponseBody resp
-        else return $ Left $
-             T.concat ["Got SecureToken fetch HTTP status error: ", show st]
+        then return $ parseKeys $ fmapL (AECertParseError . show) $
+             getResponseBody resp
+        else return $ Left $ AEPublicKeyFetchHTTPStatus st
 
   where
-    fromCertRaw :: ByteString -> Either Text X509.Certificate
+    fromCertRaw :: ByteString -> Either AuthError X509.Certificate
     fromCertRaw s = do
-        pems <- fmapL toS $ Pem.pemParseBS s
-        pem <- note "No pem found" $ headMay pems
-        signedExactCert <- fmapL toS $ X509.decodeSignedCertificate $
+        pems <- fmapL (AECertParseError . toS) $ Pem.pemParseBS s
+        pem <- note (AECertParseError "No pem found") $ headMay pems
+        signedExactCert <- fmapL (AECertParseError . toS) $
+                           X509.decodeSignedCertificate $
                            Pem.pemContent pem
         let sCert = X509.getSigned signedExactCert
             cert = X509.signedObject sCert
         return cert
 
-    certToJwk :: X509.Certificate -> Either Text JWT.JWK
+    getRSAKey (X509.PubKeyRSA (PublicKey size n e)) = Just (size, n, e)
+    getRSAKey _                                     = Nothing
+
+    certToJwk :: X509.Certificate -> Either AuthError JWT.JWK
     certToJwk cert = do
-        let X509.PubKeyRSA (PublicKey size n e) = X509.certPubKey cert
-            jwk = JWK.fromKeyMaterial $ JWK.RSAKeyMaterial $
+        (size, n, e) <- note AEUnexpectedCertFormat $ getRSAKey $
+                        X509.certPubKey cert
+        let jwk = JWK.fromKeyMaterial $ JWK.RSAKeyMaterial $
                   JWK.RSAKeyParameters (JTypes.SizedBase64Integer size n)
                   (JTypes.Base64Integer e) Nothing
             jwk' = jwk & JWK.jwkKeyOps .~ Just [JWK.Verify]
         return jwk'
 
-    parseKeys :: Either Text (H.HashMap Text Text)
-              -> Either Text (H.HashMap Text JWT.JWK)
+    parseKeys :: Either AuthError (H.HashMap Text Text)
+              -> Either AuthError (H.HashMap Text JWT.JWK)
     parseKeys b = do
         rawCertsMap <- H.map toS <$> b
         certsPairList <- forM (H.toList rawCertsMap) $ \(k, v) -> do
@@ -322,34 +343,43 @@ loadSecureTokenSigningKeys = do
 -- idToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjdhM2QxOTA0ZjE4ZTI1Nzk0ODgzMWVhYjgwM2UxMmI3OTcxZTEzYWIifQ.eyJpc3MiOiJodHRwczovL3NlY3VyZXRva2VuLmdvb2dsZS5jb20vbXlkZW1vLWI0MzVmIiwiYXVkIjoibXlkZW1vLWI0MzVmIiwiYXV0aF90aW1lIjoxNTI4NzQ5OTMxLCJ1c2VyX2lkIjoiVUNMeW9PcE9uaVZaYndhcUdKdDduMjdtQmhuMiIsInN1YiI6IlVDTHlvT3BPbmlWWmJ3YXFHSnQ3bjI3bUJobjIiLCJpYXQiOjE1Mjg3NDk5MzEsImV4cCI6MTUyODc1MzUzMSwiZW1haWwiOiJhZGl0eWFAbWluaW8uaW8iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJhZGl0eWFAbWluaW8uaW8iXX0sInNpZ25faW5fcHJvdmlkZXIiOiJwYXNzd29yZCJ9fQ.Zp3V4t86KJdtE4bciHmSAOb8AWMPJhSwb-hP-UTLoKpW8soVufnXlvOvxlOF5ptsyP9r0ScCaA8gGA6Og6RGqsXg3Q_eyqdGnGOeB2K0MLN4Kgk-YBHaUe4U6rUcXaN_kG3gdiLu7oIpzY8Afgyojj0H3r_4GQ_T7npVC-cf4XxjsvmICYh_i2UTc0TAgHsnWJKiHC49Ja-U53RARzLq2hkAAomWy_Bpy0Y_uDyHpsDdEg8wsdK400CZh-8ONklcaOCyAZaUFC63xUqJw1dvzA1975_h0V_gGneuAqldS0o7q0lovcl0KHRDkjiKNtr2g46l8ztNhuFrj5Dk4U_JrQ1"
 
 -- Takes a token, parses header info and returns a pair of (algo, kid)
-getTokenInfo :: ByteString -> Either Text (Text, Text)
+getTokenInfo :: ByteString -> Either AuthError (Text, Text)
 getTokenInfo token = do
-    header <- note "Invalid token" $ headMay $ B8.split '.' token
-    v <- fmapL toS $ eitherDecodeStrict $ B64.decodeLenient header
+    header <- note AEInvalidToken $ headMay $ B8.split '.' token
+    v <- fmapL (AEInvalidTokenHeader . show) $ eitherDecodeStrict $
+         B64.decodeLenient header
     let [alg, kid] = ["alg", "kid"] :: [Text]
-    note "Invalid token" ((,) <$> H.lookup alg v <*> H.lookup kid v)
+    note (AEInvalidTokenHeader "Missing alg or kid")
+        ((,) <$> H.lookup alg v <*> H.lookup kid v)
 
-verifyToken :: ByteString -> H.HashMap Text JWT.JWK -> Either (Maybe Text) Value
+verifyToken :: ByteString -> H.HashMap Text JWT.JWK
+            -> IO (Either AuthError Value)
 verifyToken token keyStore = do
-    (_, kid) <- fmapL Just $ getTokenInfo token
-    jwk <- note Nothing $ H.lookup kid keyStore
-    jws <- fmapL (Just . show) $ (decodeCompact (toS token) :: Either JWT.Error  (JWS.CompactJWS JWS.JWSHeader))
-    payload <- fmapL (Just . show) $ (JWS.verifyJWS' jwk jws :: Either JWT.Error ByteString)
-    fmapL (Just . show) $ eitherDecodeStrict payload
+    let resE = do
+            (_, kid) <- getTokenInfo token
+            jwk <- note AEUnknownKid $ H.lookup kid keyStore
+            jws <- fmapL (AETokenDecode . show) $ (decodeCompact (toS token) :: Either JWT.Error JWT.SignedJWT)
+            return (jwk, jws)
+    case resE of
+      Left err -> return $ Left err
+      Right (jwk, jws) -> runExceptT $ do
+          claims <- fmapLT (AEVerification . (show :: JWT.JWTError -> Text)) $
+                    JWT.verifyClaims (JWT.defaultJWTValidationSettings (const True)) jwk jws
+                    -- ExceptT $ (JWT.verifyClaims JWT.defaultJWTValidationSettings jwk jws -- :: IO (Either JWT.Error JWT.ClaimsSet))
+          return $ toJSON claims
 
 verifyTokenWithKeyReload :: (MonadIO m)
                          => ByteString -> H.HashMap Text JWT.JWK
                          -> Bool
-                         -> m (Either Text (H.HashMap Text JWT.JWK, Value))
+                         -> m (Either AuthError (H.HashMap Text JWT.JWK, Value))
 verifyTokenWithKeyReload token keyStore isReloaded =
     case getTokenInfo token of
         Left err -> return $ Left err
         Right (_, kid)
-            | H.member kid keyStore -> return $ do
-                  payload <- fmapL (maybe "InvalidToken" identity) $
-                             verifyToken token keyStore
+            | H.member kid keyStore -> runExceptT $ do
+                  payload <- ExceptT $ liftIO $ verifyToken token keyStore
                   return (keyStore, payload)
-            | isReloaded -> return $ Left "InvalidToken"
+            | isReloaded -> return $ Left AEUnknownKid
             | otherwise -> do
                   newStoreE <- loadSecureTokenSigningKeys
                   either
@@ -358,7 +388,7 @@ verifyTokenWithKeyReload token keyStore isReloaded =
                       newStoreE
 
 extractTokenClaims :: (MonadReader Connector m, MonadIO m, MonadUnliftIO m)
-                   => ByteString -> m (Either Text Value)
+                   => ByteString -> m (Either AuthError Value)
 extractTokenClaims token = do
     keyStoreVar <- asks cSecureTokenPubKeys
     Conc.modifyMVar keyStoreVar $ \keyStore -> do
