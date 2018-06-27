@@ -25,8 +25,9 @@ import           Network.HTTP.Simple as Exports (Request, Response,
                                                  httpJSONEither, parseRequest_,
                                                  setRequestBodyJSON,
                                                  setRequestBodyURLEncoded,
+                                                 setRequestHeader,
                                                  setRequestQueryString)
-import           Network.HTTP.Types  as Exports (Status, status200)
+import           Network.HTTP.Types  as Exports (Header, Status, status200)
 import           UnliftIO            as Exports (MonadUnliftIO)
 
 import qualified Data.Aeson          as A

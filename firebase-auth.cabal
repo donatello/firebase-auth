@@ -41,6 +41,7 @@ library
                      , NoImplicitPrelude
                      , FlexibleContexts
                      , TemplateHaskell
+                     , TupleSections
 
 test-suite firebase-auth-test
   type:                exitcode-stdio-1.0

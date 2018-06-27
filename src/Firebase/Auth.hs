@@ -31,6 +31,13 @@ module Firebase.Auth
     , ConfirmEmailVerificationResp(..)
     , confirmEmailVerification
 
+    , PasswordResetEmailResp(..)
+    , sendPasswordResetEmail
+
+    , PasswordResetResp(..)
+    , verifyPasswordResetCode
+    , confirmPasswordReset
+
     , ApiErr(..)
 
     , extractTokenClaims
@@ -42,7 +49,6 @@ module Firebase.Auth
 import           Control.Error           (fmapL)
 import           Crypto.JOSE.Compact     (decodeCompact)
 import qualified Crypto.JOSE.JWK         as JWK
-import qualified Crypto.JOSE.JWS         as JWS
 import qualified Crypto.JOSE.Types       as JTypes
 import qualified Crypto.JWT              as JWT
 import           Crypto.PubKey.RSA.Types (PublicKey (..))
@@ -70,6 +76,17 @@ mkConnector apiKey = do
     keyStore <- Conc.newMVar H.empty
     return $ Connector keyStore apiKey
 
+-- A data type for errors when calling the Firebase APIs.
+data ApiErr = AEJSONParseErr Text -- ^ A JSON parsing error - if this
+                                  -- is returned, please report a bug.
+            | AEApiErr Status Value -- ^ An error returned by the
+                                    -- Firebase endpoint. The @Status@
+                                    -- is the HTTP error code and the
+                                    -- @Value@ is a raw JSON
+                                    -- representation of the error
+                                    -- details.
+            deriving (Eq, Show)
+
 -- The simplest way to call the Firebase APIs provided in this
 -- module. Use this if your application does not already have a Monad
 -- Transformer stack.
@@ -84,22 +101,17 @@ setApiKey r = do
 
 execRequest :: (ToJSON a, MonadReader Connector m, MonadIO m, FromJSON b)
             => [Char] -> a -> m (Either ApiErr b)
-execRequest url body = do
-    let iReq = parseRequest_ url
-    req <- setApiKey $ setRequestBodyJSON body iReq
+execRequest url body = execRequestWithHeader url body []
+
+execRequestWithHeader :: ( ToJSON a, MonadReader Connector m, MonadIO m
+                         , FromJSON b)
+                      => [Char] -> a -> [Header] -> m (Either ApiErr b)
+execRequestWithHeader url body hs = do
+    let r1 = setRequestBodyJSON body $ parseRequest_ url
+        r2 = foldr (\(a, b) -> setRequestHeader a [b]) r1 hs
+    req <- setApiKey r2
     resp <- httpBS req
     return $ parseResponse resp
-
--- A data type for errors when calling the Firebase APIs.
-data ApiErr = AEJSONParseErr Text -- ^ A JSON parsing error - if this
-                                  -- is returned, please report a bug.
-            | AEApiErr Status Value -- ^ An error returned by the
-                                    -- Firebase endpoint. The @Status@
-                                    -- is the HTTP error code and the
-                                    -- @Value@ is a raw JSON
-                                    -- representation of the error
-                                    -- details.
-            deriving (Eq, Show)
 
 parseResponse :: (FromJSON a) => Response ByteString -> Either ApiErr a
 parseResponse resp =
@@ -254,6 +266,52 @@ confirmEmailVerification :: (MonadReader Connector m, MonadIO m)
 confirmEmailVerification oobCode = do
     let url = "POST https://www.googleapis.com/identitytoolkit/v3/relyingparty/setAccountInfo"
         body = object [ "oobCode" .= oobCode ]
+    execRequest url body
+
+data PasswordResetEmailResp = PasswordResetEmailResp
+                              { prerKind  :: Text
+                              , prerEmail :: Text
+                              } deriving (Eq, Show)
+
+$(deriveJSON (camelCase 4) ''PasswordResetEmailResp)
+
+sendPasswordResetEmail :: (MonadReader Connector m, MonadIO m)
+                       => Text -> Maybe Text
+                       -> m (Either ApiErr PasswordResetEmailResp)
+sendPasswordResetEmail email localeM = do
+    let url = "POST https://www.googleapis.com/identitytoolkit/v3/relyingparty/getOobConfirmationCode"
+        body = object [ "requestType" .= ("PASSWORD_RESET" :: Text)
+                      , "email" .= email
+                      ]
+    maybe (execRequest url body)
+        ( execRequestWithHeader url body
+        . (\v -> [("X-Firebase-Locale", toS v)]) )
+        localeM
+
+data PasswordResetResp = PasswordResetResp
+                         { prrKind        :: Text
+                         , prrEmail       :: Text
+                         , prrRequestType :: Text
+                         } deriving (Eq, Show)
+
+$(deriveJSON (camelCase 3) ''PasswordResetResp)
+
+verifyPasswordResetCode :: (MonadReader Connector m, MonadIO m)
+                        => Text
+                        -> m (Either ApiErr PasswordResetResp)
+verifyPasswordResetCode oobCode = do
+    let url = "POST https://www.googleapis.com/identitytoolkit/v3/relyingparty/resetPassword"
+        body = object [ "oobCode" .= oobCode ]
+    execRequest url body
+
+confirmPasswordReset :: (MonadReader Connector m, MonadIO m)
+                     => Text -> Text
+                     -> m (Either ApiErr PasswordResetResp)
+confirmPasswordReset oobCode newPassword = do
+    let url = "POST https://www.googleapis.com/identitytoolkit/v3/relyingparty/resetPassword"
+        body = object [ "oobCode" .= oobCode
+                      , "newPassword" .= newPassword
+                      ]
     execRequest url body
 
 -- $use
