@@ -11,31 +11,47 @@ module Firebase.Auth
     , mkConnector
     , runIO
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-create-email-password
     , SignupResponse(..)
     , signupWithEmailAndPassword
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-sign-in-email-password
     , SigninResponse(..)
     , signinWithEmailAndPassword
 
     , RefreshIdResponse(..)
     , refreshIdToken
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-get-account-info
     , ProviderData(..)
     , UserData(..)
     , GetUserDataResponse(..)
     , getUserData
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-send-email-verification
     , SendEmailVerificationResp(..)
     , sendEmailVerification
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-confirm-email-verification
     , ConfirmEmailVerificationResp(..)
     , confirmEmailVerification
 
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-send-password-reset-email
     , PasswordResetEmailResp(..)
     , sendPasswordResetEmail
 
+    -- Ref: https://firebase.google.com/docs/reference/rest/auth/#section-verify-password-reset-code
     , PasswordResetResp(..)
     , verifyPasswordResetCode
+
+    -- Ref:
+    -- https://firebase.google.com/docs/reference/rest/auth/#section-confirm-reset-password
     , confirmPasswordReset
 
     , ApiErr(..)
@@ -445,6 +461,9 @@ verifyTokenWithKeyReload token keyStore isReloaded =
                       (\store -> verifyTokenWithKeyReload token store True)
                       newStoreE
 
+-- | Verify an id token. This extracts the signature, and verifies it by
+-- automatically fetching Google Token API's public key, and checking
+-- details in the request.
 extractTokenClaims :: (MonadReader Connector m, MonadIO m, MonadUnliftIO m)
                    => ByteString -> m (Either AuthError Value)
 extractTokenClaims token = do
